@@ -1,0 +1,40 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+
+# Visual Studio and user-specific files
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Rider and ReSharper
+.idea/
+_ReSharper*/
+*.DotSettings.user
+
+# Test results and coverage
+TestResults/
+*.trx
+coverage/
+coverage-report/
+
+# NuGet and package artifacts
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+
+# ASP.NET Core local files
+appsettings.Local.json
+appsettings.*.Local.json
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# OS-generated files
+.DS_Store
+Thumbs.db
