@@ -1,7 +1,8 @@
 # Plan: Real-Time PnL Capture, Processing & Reporting POC
 
 Greenfield POC in empty workspace `c:\Users\z004ff8j\OneDrive - Siemens AG\study\bnp\poc`.
-Clean Architecture .NET 9 backend + Angular 19 SPA + RabbitMQ + SignalR + MS SQL 2022, all via docker-compose.
+Clean Architecture .NET backend + Angular SPA + RabbitMQ + SignalR + MS SQL 2022, all via docker-compose.
+Use the latest stable version available for the tech-stacks.
 
 ## Confirmed decisions (latest discussion)
 - Layout: `ui/` (Angular) + `server/` (one .sln, multiple projects) + `docker-compose.yml` at root — both are direct children of the workspace root, no intermediate `src/` folder.
@@ -125,14 +126,19 @@ Migrations applied at API startup via migration runner with retry.
 - Upsert is keyed by `AccountNumber`: existing account rows are updated in place; new accounts are inserted. Both valid and excluded rows are persisted and reported.
 - UI receives a SignalR event for each processed record and adds/updates it in the corresponding table.
 
-## Phases
-1. Scaffolding & infra (solution, projects, refs, docker-compose, MinIO, RabbitMQ, SQL, Serilog, health checks).
-2. Domain + Application (entity, rule, ports, handlers, result pattern).
-3. Infrastructure (EF Core, repository, RabbitMQ topology, MinIO adapter, CSV parser).
-4. API (controllers, hub, notification relay, CORS, Swagger, migration runner).
-5. Hosted consumers (FileWorkerHostedService, QueueWorkerHostedService, shared consumer base class with manual ack).
-6. Angular SPA (feed-type selector, upload form, realtime form, two live tables, SignalR client).
-7. Dockerize + compose everything, run end-to-end verification.
+## Phases (execution order)
+Server is built and fully working end-to-end (in-process, no Docker yet) before touching infra or UI. Each phase is a checkpoint for review before moving to the next.
+
+1. **Solution scaffolding**: create `server/PnL.sln` and the 5 projects (`PnL.Domain`, `PnL.Application`, `PnL.Infrastructure`, `PnL.Contracts`, `PnL.Api`), wire project references per the dependency direction, add `Directory.Build.props`. No docker-compose yet.
+2. **Domain layer**: `PnLRecord`, `PnLStatus`/`FeedSource` enums, `ZeroAmountExclusionRule`.
+3. **Application layer**: ports (`IPnLRepository`, `IFeedPublisher`, `INotificationPublisher`, `IFileStorage`, `ICsvFeedParser`), `IPnLRecordProcessor`/`PnLRecordProcessor`, `IPnLReportService`/`PnLReportService`.
+4. **Infrastructure layer**: EF Core `PnLDbContext` + configuration + migrations, `PnLRepository`, RabbitMQ connection/publishers, MinIO adapter, CSV parser.
+5. **Contracts**: `FileUploadedMessage`, `RealtimePnLMessage`, `PnLProcessedNotification`.
+6. **API layer**: `FeedsController`, `ReportsController`, `PnLHub`, `NotificationRelayHostedService`, `FileWorkerHostedService`, `QueueWorkerHostedService`, `RabbitMqConsumerBase`, Swagger, health checks, CORS.
+7. **Checkpoint — server complete.** Await user acknowledgement before proceeding.
+8. **Docker & infra config**: `docker-compose.yml`, MS SQL container, RabbitMQ container, MinIO container, migration runner with retry, environment/config wiring so the API + hosted services run fully containerized.
+9. **Angular SPA**: feed-type selector, upload form, realtime form, two live tables, SignalR client, Dockerfile + nginx.
+10. **End-to-end verification**: run the full stack via `docker compose up -d --build` and validate against the checklist below.
 
 ## Verification checklist
 1. Start stack via `docker compose up -d --build`.
