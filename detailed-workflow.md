@@ -9,13 +9,9 @@ Angular UI
 
 PnL.Api
   - Receives UI requests
-  - Stores CSV files in MinIO
-  - Publishes RabbitMQ messages
+  - Validates CSV files and publishes their content through RabbitMQ
   - Serves reports
   - Hosts SignalR hub
-
-MinIO
-  - Stores uploaded CSV files
 
 RabbitMQ
   - Queues ingestion messages
@@ -24,7 +20,7 @@ RabbitMQ
 
 PnL.FileWorker
   - Consumes file-upload messages
-  - Downloads and parses CSV files
+  - Parses CSV content from messages
 
 PnL.QueueWorker
   - Consumes realtime PnL messages
@@ -45,7 +41,6 @@ sequenceDiagram
     actor User
     participant UI as Angular UI
     participant API as PnL.Api
-    participant MinIO
     participant MQ as RabbitMQ
     participant FW as PnL.FileWorker
     participant DB as SQL Server
@@ -55,11 +50,10 @@ sequenceDiagram
     User->>UI: Select File, choose CSV, submit
     UI->>API: POST /api/feeds/file (multipart)
     API->>API: Validate extension/size, generate BatchId
-    API->>MinIO: Store raw CSV (bucket/objectKey)
-    API->>MQ: Publish FileUploadedMessage(BatchId, Bucket, ObjectKey)
+    API->>MQ: Publish FileUploadedMessage(BatchId, FileName, Content)
     API-->>UI: 202 Accepted { batchId }
     MQ->>FW: Deliver FileUploadedMessage
-    FW->>MinIO: Download/stream CSV
+    FW->>FW: Read CSV content from message
     loop Each CSV row
         FW->>FW: Parse row (SourceSystem, AccountNumber, PnLAmount)
         FW->>FW: Apply ZeroAmountExclusionRule -> Valid/Excluded
@@ -139,15 +133,14 @@ If PnLAmount != 0:
 
 ## 4. Application Startup Workflow
 
-1. Docker Compose starts SQL Server, RabbitMQ, MinIO, `PnL.Api`, `PnL.FileWorker`, `PnL.QueueWorker`, and the Angular UI.
+1. Docker Compose starts SQL Server, RabbitMQ, `PnL.Api`, `PnL.FileWorker`, `PnL.QueueWorker`, and the Angular UI.
 2. `PnL.Api` waits for SQL Server and applies EF Core migrations.
 3. RabbitMQ exchanges and queues are declared if they do not already exist.
-4. MinIO bucket creation is checked and the required bucket is created if missing.
-5. `PnL.Api` starts the SignalR hub at `/hubs/pnl`.
-6. `NotificationRelayHostedService` starts consuming the notification queue.
-7. `PnL.FileWorker` starts consuming the file-upload queue.
-8. `PnL.QueueWorker` starts consuming the realtime queue.
-9. Angular loads and connects to the API SignalR hub.
+4. `PnL.Api` starts the SignalR hub at `/hubs/pnl`.
+5. `NotificationRelayHostedService` starts consuming the notification queue.
+6. `PnL.FileWorker` starts consuming the file-upload queue.
+7. `PnL.QueueWorker` starts consuming the realtime queue.
+8. Angular loads and connects to the API SignalR hub.
 
 ## 5. Angular Initial Load Workflow
 
@@ -186,55 +179,46 @@ Content-Type: multipart/form-data
    - file has an allowed CSV extension
    - file size is within the configured limit
 8. The API generates a new `BatchId` for this upload request.
-9. The API generates a MinIO object key, for example:
-
-```text
-uploads/{BatchId}/input.csv
-```
-
-10. The API streams the raw file into the configured MinIO bucket.
-11. The API creates a `FileUploadedMessage` containing:
+9. The API creates a `FileUploadedMessage` containing the bounded CSV payload:
 
 ```json
 {
   "batchId": "batch-guid",
-  "bucket": "pnl-files",
-  "objectKey": "uploads/batch-guid/input.csv"
+  "fileName": "input.csv",
+  "content": "<base64-encoded CSV bytes>"
 }
 ```
 
-12. The API publishes the message to the RabbitMQ file-ingestion route.
-13. The API returns `202 Accepted` with the `BatchId`.
-14. The UI can show that the batch was accepted for asynchronous processing.
+10. The API publishes the message to the RabbitMQ file-ingestion route. The configured upload limit must keep the serialized message below the broker's maximum message size.
+11. The API returns `202 Accepted` with the `BatchId`.
+12. The UI can show that the batch was accepted for asynchronous processing.
 
 ### 6.3 FileWorker consumes the upload message
 
-15. `FileFeedConsumer` in `PnL.FileWorker` receives the message from RabbitMQ.
-16. The worker confirms that the message contains a valid `BatchId`, bucket, and object key.
-17. The worker downloads or streams the CSV from MinIO.
-18. The worker parses the header:
+13. `FileFeedConsumer` in `PnL.FileWorker` receives the message from RabbitMQ.
+14. The worker confirms that the message contains a valid `BatchId`, file name, and content.
+15. The worker reads the CSV content from the message and parses the header:
 
 ```csv
 SourceSystem,AccountNumber,PnLAmount
 ```
 
-19. The worker reads the file row by row.
-20. The worker does not load the complete file into memory.
-21. For each row, it converts:
+16. The worker reads the bounded message content row by row; the complete CSV payload is already present in the message.
+17. For each row, it converts:
    - `SourceSystem` to `string`
    - `AccountNumber` to `int`
    - `PnLAmount` to `int`
-22. The worker passes each parsed row to the shared record-processing use case.
+18. The worker passes each parsed row to the shared record-processing use case.
 
 ### 6.4 Each CSV row is processed
 
-23. The shared processing logic evaluates `PnLAmount`.
-24. The record is assigned either `Valid` or `Excluded` status.
-25. The record is assigned `FeedSource = File`.
-26. The record is assigned the current file's `BatchId`.
-27. The repository searches for an existing row by `AccountNumber`.
-28. If the account does not exist, a new `PnLRecord` is inserted.
-29. If the account already exists, its current values are updated:
+19. The shared processing logic evaluates `PnLAmount`.
+20. The record is assigned either `Valid` or `Excluded` status.
+21. The record is assigned `FeedSource = File`.
+22. The record is assigned the current file's `BatchId`.
+23. The repository searches for an existing row by `AccountNumber`.
+24. If the account does not exist, a new `PnLRecord` is inserted.
+25. If the account already exists, its current values are updated:
    - `SourceSystem`
    - `PnLAmount`
    - `Status`
@@ -242,16 +226,14 @@ SourceSystem,AccountNumber,PnLAmount
    - `FeedSource`
    - `BatchId`
    - `CapturedAtUtc`
-30. SQL changes are saved.
-31. The worker publishes a `PnLProcessedNotification` for the processed row.
-32. The worker continues with the next CSV row.
+26. SQL changes are saved.
+27. The worker publishes a `PnLProcessedNotification` for the processed row.
+28. The worker continues with the next CSV row.
 
 ### 6.5 File completion
 
-33. After all rows are processed, the worker acknowledges the RabbitMQ file message.
-34. The worker may log the batch result, including processed and excluded counts.
-35. The CSV remains in MinIO according to the POC retention policy.
-36. A later cleanup process can remove old files if required.
+29. After all rows are processed, the worker acknowledges the RabbitMQ file message.
+30. The worker may log the batch result, including processed and excluded counts.
 
 ## 7. Realtime PnL Workflow
 
@@ -367,7 +349,7 @@ This flow is common to both FileWorker and QueueWorker.
 
 ### 10.3 Technical processing failure
 
-1. A worker cannot connect to SQL Server, MinIO, or RabbitMQ, or encounters an unexpected exception.
+1. A worker cannot connect to SQL Server or RabbitMQ, or encounters an unexpected exception.
 2. The worker does not acknowledge the message as successfully processed.
 3. RabbitMQ retries or redelivers the message according to the configured retry policy.
 4. After the retry limit is reached, the message is routed to the dead-letter queue.
@@ -385,14 +367,13 @@ This flow is common to both FileWorker and QueueWorker.
 
 1. The user uploads a CSV that was uploaded previously.
 2. The API generates a new `BatchId`.
-3. The API stores the file as a new MinIO object.
-4. The API publishes a new file-upload message.
-5. The FileWorker processes the rows again.
-6. For each account, the repository searches by `AccountNumber`.
-7. Existing accounts are updated rather than inserted as duplicate rows.
-8. New accounts are inserted.
-9. The UI receives updates for the current values.
-10. SQL continues to contain one row per `AccountNumber` for this POC.
+3. The API publishes a new file-upload message containing the CSV bytes.
+4. The FileWorker processes the rows again.
+5. For each account, the repository searches by `AccountNumber`.
+6. Existing accounts are updated rather than inserted as duplicate rows.
+7. New accounts are inserted.
+8. The UI receives updates for the current values.
+9. SQL continues to contain one row per `AccountNumber` for this POC.
 
 ## 12. End-to-End Examples
 
@@ -430,10 +411,9 @@ UI submits ABC / 1002 / 0
 
 ```text
 UI uploads CSV
-  -> API stores raw file in MinIO
-  -> API publishes FileUploaded message
+  -> API publishes bounded CSV content in FileUploaded message
   -> FileWorker consumes message
-  -> FileWorker reads CSV from MinIO
+  -> FileWorker parses CSV content from message
   -> each row uses shared processing logic
   -> SQL upsert per AccountNumber
   -> notification per processed row
@@ -447,11 +427,10 @@ UI uploads CSV
 | Angular UI | Collect input, call API, display reports, receive SignalR events | Apply final business validation or write SQL |
 | `FeedsController` | Accept file/realtime requests and publish messages | Parse CSV rows or process PnL business rules |
 | `ReportsController` | Return current report data | Consume RabbitMQ ingestion messages |
-| `FileWorker` | Download and process CSV files | Host HTTP endpoints or SignalR |
+| `FileWorker` | Parse and process CSV content from RabbitMQ messages | Host HTTP endpoints or SignalR |
 | `QueueWorker` | Process realtime queue messages | Host HTTP endpoints or SignalR |
 | Application layer | Orchestrate use cases and repository calls | Depend on SQL or RabbitMQ implementation details |
 | Domain rule | Decide Valid versus Excluded | Read files, call SQL, or publish messages |
-| MinIO | Store raw uploaded files | Validate or process PnL rows |
 | RabbitMQ | Transport asynchronous messages | Apply business rules or store report data |
 | SQL Server | Persist current account state | Push live updates to browsers |
 | `NotificationRelayHostedService` | Convert RabbitMQ notifications into SignalR broadcasts | Process ingestion messages |
