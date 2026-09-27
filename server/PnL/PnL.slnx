@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="PnL.Application/PnL.Application.csproj" />
+  <Project Path="PnL.Infrastructure/PnL.Infrastructure.csproj" />
   <Project Path="PnL.Domain/PnL.Domain.csproj" />
   <Project Path="PnL/PnL.csproj" />
 </Solution>

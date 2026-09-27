@@ -106,7 +106,7 @@ sequenceDiagram
     participant DLQ as pnl.dead-letter
 
     MQ->>W: Deliver message
-    W->>W: Processing throws (SQL/MinIO/deserialization failure)
+    W->>W: Processing throws (SQL/RabbitMQ/deserialization failure)
     W--xMQ: Nack (no ack)
     MQ->>W: Redeliver (retry count incremented)
     W->>W: Processing fails again (retry limit reached)
